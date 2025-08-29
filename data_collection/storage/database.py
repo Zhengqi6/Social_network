@@ -6,8 +6,9 @@ import asyncio
 from typing import Dict, List, Optional, Any, Union
 from datetime import datetime
 import pandas as pd
-from pymongo import MongoClient
+from pymongo import MongoClient, UpdateOne
 from pymongo.errors import DuplicateKeyError
+from bson import json_util, ObjectId
 from neo4j import GraphDatabase
 from redis import Redis
 from loguru import logger
@@ -79,6 +80,30 @@ class MongoDBStorage:
         self.db = db_manager.mongodb_db
         self.collections = DATABASE_CONFIG["mongodb"]["collections"]
     
+    def _bulk_upsert(self, col, docs, uniq_key):
+        """幂等批量写入；uniq_key 如 'profile_id'/'publication_id'/'engagement_id'"""
+        ops = []
+        for d in docs:
+            d = dict(d)
+            d.pop('_id', None)              # 防止 ObjectId 再次冲突
+            key = {uniq_key: d[uniq_key]}
+            ops.append(UpdateOne(key, {'$set': d}, upsert=True))
+        try:
+            res = col.bulk_write(ops, ordered=False)
+            logger.info(
+                f"{col.name} upserted={res.upserted_count} matched={res.matched_count} modified={res.modified_count}"
+            )
+            return res.upserted_count + res.modified_count
+        except errors.BulkWriteError as e:
+            # 仅忽略重复键，其他错误抛出
+            nondups = [er for er in e.details.get('writeErrors', []) if er.get('code') != 11000]
+            if nondups:
+                raise
+            dups = len(e.details.get('writeErrors', []))
+            logger.warning(f"{col.name}: ignored {dups} duplicate key errors")
+            # 返回成功写入的数量
+            return e.details.get('nInserted', 0) + e.details.get('nModified', 0)
+    
     async def store_profiles(self, profiles: List[Dict[str, Any]]) -> int:
         """Store user profiles in MongoDB"""
         if not profiles:
@@ -90,28 +115,8 @@ class MongoDBStorage:
             # Add unique index on profile_id if not exists
             collection.create_index("profile_id", unique=True)
             
-            # Insert profiles
-            result = collection.insert_many(profiles, ordered=False)
-            logger.info(f"Stored {len(result.inserted_ids)} profiles in MongoDB")
-            return len(result.inserted_ids)
-            
-        except DuplicateKeyError:
-            # Handle duplicates by updating existing records
-            updated_count = 0
-            for profile in profiles:
-                try:
-                    collection = self.db[self.collections["users"]]
-                    collection.replace_one(
-                        {"profile_id": profile["profile_id"]},
-                        profile,
-                        upsert=True
-                    )
-                    updated_count += 1
-                except Exception as e:
-                    logger.error(f"Error updating profile {profile['profile_id']}: {e}")
-            
-            logger.info(f"Updated {updated_count} profiles in MongoDB")
-            return updated_count
+            # Use bulk upsert for power operations
+            return self._bulk_upsert(collection, profiles, 'profile_id')
             
         except Exception as e:
             logger.error(f"Error storing profiles in MongoDB: {e}")
@@ -128,28 +133,8 @@ class MongoDBStorage:
             # Add unique index on publication_id if not exists
             collection.create_index("publication_id", unique=True)
             
-            # Insert posts
-            result = collection.insert_many(posts, ordered=False)
-            logger.info(f"Stored {len(result.inserted_ids)} posts in MongoDB")
-            return len(result.inserted_ids)
-            
-        except DuplicateKeyError:
-            # Handle duplicates
-            updated_count = 0
-            for post in posts:
-                try:
-                    collection = self.db[self.collections["posts"]]
-                    collection.replace_one(
-                        {"publication_id": post["publication_id"]},
-                        post,
-                        upsert=True
-                    )
-                    updated_count += 1
-                except Exception as e:
-                    logger.error(f"Error updating post {post['publication_id']}: {e}")
-            
-            logger.info(f"Updated {updated_count} posts in MongoDB")
-            return updated_count
+            # Use bulk upsert for power operations
+            return self._bulk_upsert(collection, posts, 'publication_id')
             
         except Exception as e:
             logger.error(f"Error storing posts in MongoDB: {e}")
@@ -204,28 +189,8 @@ class MongoDBStorage:
             # Add unique index on engagement_id if not exists
             collection.create_index("engagement_id", unique=True)
             
-            # Insert engagements
-            result = collection.insert_many(engagements, ordered=False)
-            logger.info(f"Stored {len(result.inserted_ids)} engagements in MongoDB")
-            return len(result.inserted_ids)
-            
-        except DuplicateKeyError:
-            # Handle duplicates
-            updated_count = 0
-            for engagement in engagements:
-                try:
-                    collection = self.db[self.collections["interactions"]]
-                    collection.replace_one(
-                        {"engagement_id": engagement["engagement_id"]},
-                        engagement,
-                        upsert=True
-                    )
-                    updated_count += 1
-                except Exception as e:
-                    logger.error(f"Error updating engagement {engagement['engagement_id']}: {e}")
-            
-            logger.info(f"Updated {updated_count} engagements in MongoDB")
-            return updated_count
+            # Use bulk upsert for power operations
+            return self._bulk_upsert(collection, engagements, 'engagement_id')
             
         except Exception as e:
             logger.error(f"Error storing engagements in MongoDB: {e}")
@@ -279,25 +244,23 @@ class Neo4jStorage:
                     # Create user node
                     query = """
                     MERGE (u:User {profile_id: $profile_id})
-                    SET u.handle = $handle,
-                        u.name = $name,
-                        u.bio = $bio,
-                        u.total_followers = $total_followers,
-                        u.total_following = $total_following,
-                        u.total_posts = $total_posts,
-                        u.owned_by = $owned_by,
+                    SET u.account_id = $account_id,
+                        u.block_number = $block_number,
+                        u.transaction_hash = $transaction_hash,
+                        u.created_at = $created_at,
+                        u.type = $type,
+                        u.platform = $platform,
                         u.collected_at = $collected_at
                     """
                     
                     session.run(query, {
                         "profile_id": profile["profile_id"],
-                        "handle": profile["handle"],
-                        "name": profile["name"],
-                        "bio": profile.get("bio", ""),
-                        "total_followers": profile.get("total_followers", 0),
-                        "total_following": profile.get("total_following", 0),
-                        "total_posts": profile.get("total_posts", 0),
-                        "owned_by": profile["owned_by"],
+                        "account_id": profile["account_id"],
+                        "block_number": profile["block_number"],
+                        "transaction_hash": profile["transaction_hash"],
+                        "created_at": profile["created_at"],
+                        "type": profile["type"],
+                        "platform": profile["platform"],
                         "collected_at": profile["collected_at"]
                     })
                     created_count += 1
@@ -320,37 +283,39 @@ class Neo4jStorage:
                 for post in posts:
                     # Create post node
                     query = """
-                    MERGE (p:Post {publication_id: $publication_id})
+                    MERGE (p:Post {post_id: $post_id})
                     SET p.type = $type,
-                        p.content = $content,
-                        p.created_at_timestamp = $created_at_timestamp,
-                        p.total_mirrors = $total_mirrors,
-                        p.total_comments = $total_comments,
-                        p.total_collects = $total_collects,
+                        p.account_id = $account_id,
+                        p.block_number = $block_number,
+                        p.transaction_hash = $transaction_hash,
+                        p.created_at = $created_at,
+                        p.platform = $platform,
                         p.collected_at = $collected_at
                     """
                     
                     session.run(query, {
-                        "publication_id": post["publication_id"],
+                        "post_id": post["post_id"],
                         "type": post["type"],
-                        "content": post.get("content", ""),
-                        "created_at_timestamp": post["created_at_timestamp"],
-                        "total_mirrors": post.get("total_mirrors", 0),
-                        "total_comments": post.get("total_comments", 0),
-                        "total_collects": post.get("total_collects", 0),
+                        "account_id": post["account_id"],
+                        "block_number": post["block_number"],
+                        "transaction_hash": post["transaction_hash"],
+                        "created_at": post["created_at"],
+                        "platform": post["platform"],
                         "collected_at": post["collected_at"]
                     })
                     
                     # Create relationship with user
                     rel_query = """
-                    MATCH (u:User {profile_id: $profile_id})
-                    MATCH (p:Post {publication_id: $publication_id})
-                    MERGE (u)-[:POSTED]->(p)
+                    MATCH (u:User {account_id: $account_id})
+                    MATCH (p:Post {post_id: $post_id})
+                    MERGE (u)-[:POSTED {block_number: $block_number, timestamp: $created_at}]->(p)
                     """
                     
                     session.run(rel_query, {
-                        "profile_id": post["profile_id"],
-                        "publication_id": post["publication_id"]
+                        "account_id": post["account_id"],
+                        "post_id": post["post_id"],
+                        "block_number": post["block_number"],
+                        "created_at": post["created_at"]
                     })
                     
                     created_count += 1
@@ -402,34 +367,19 @@ class Neo4jStorage:
             with self.driver.session() as session:
                 created_count = 0
                 for engagement in engagements:
-                    if engagement["type"] == "mirror":
-                        # Create mirror relationship
-                        query = """
-                        MATCH (u:User {profile_id: $profile_id})
-                        MATCH (p:Post {publication_id: $publication_id})
-                        MERGE (u)-[:MIRRORED {timestamp: $timestamp}]->(p)
-                        """
-                        
-                        session.run(query, {
-                            "profile_id": engagement["profile_id"],
-                            "publication_id": engagement["publication_id"],
-                            "timestamp": engagement["timestamp"]
-                        })
-                        
-                    elif engagement["type"] == "comment":
-                        # Create comment relationship
-                        query = """
-                        MATCH (u:User {profile_id: $profile_id})
-                        MATCH (p:Post {publication_id: $publication_id})
-                        MERGE (u)-[:COMMENTED {timestamp: $timestamp, content: $content}]->(p)
-                        """
-                        
-                        session.run(query, {
-                            "profile_id": engagement["profile_id"],
-                            "publication_id": engagement["publication_id"],
-                            "timestamp": engagement["timestamp"],
-                            "content": engagement.get("content", "")
-                        })
+                    # Create interaction relationship
+                    query = """
+                    MATCH (u:User {account_id: $account_id})
+                    MATCH (p:Post {post_id: $post_id})
+                    MERGE (u)-[:INTERACTED {type: $type, timestamp: $timestamp}]->(p)
+                    """
+                    
+                    session.run(query, {
+                        "account_id": engagement["account_id"],
+                        "post_id": engagement["post_id"],
+                        "type": engagement["type"],
+                        "timestamp": engagement["created_at"]
+                    })
                     
                     created_count += 1
                 
@@ -438,6 +388,68 @@ class Neo4jStorage:
                 
         except Exception as e:
             logger.error(f"Error creating engagement relationships in Neo4j: {e}")
+            return 0
+    
+    async def create_interaction_relationships(self, interactions: List[Dict[str, Any]]) -> int:
+        """Create interaction relationships in Neo4j (alias for create_engagement_relationships)"""
+        return await self.create_engagement_relationships(interactions)
+    
+    async def create_follow_relationships_mock(self, accounts: List[Dict[str, Any]]) -> int:
+        """Create mock follow relationships between users for testing"""
+        if len(accounts) < 2:
+            return 0
+        
+        try:
+            with self.driver.session() as session:
+                created_count = 0
+                
+                # Create follow relationships between consecutive users
+                for i in range(len(accounts) - 1):
+                    follower = accounts[i]
+                    following = accounts[i + 1]
+                    
+                    query = """
+                    MATCH (follower:User {profile_id: $follower_id})
+                    MATCH (following:User {profile_id: $following_id})
+                    MERGE (follower)-[:FOLLOWS {created_at: $timestamp, platform: $platform}]->(following)
+                    """
+                    
+                    session.run(query, {
+                        "follower_id": follower["profile_id"],
+                        "following_id": following["profile_id"],
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "platform": follower.get("platform", "unknown")
+                    })
+                    
+                    created_count += 1
+                
+                # Create some additional random follows
+                import random
+                for _ in range(min(3, len(accounts))):
+                    follower = random.choice(accounts)
+                    following = random.choice(accounts)
+                    
+                    if follower["profile_id"] != following["profile_id"]:
+                        query = """
+                        MATCH (follower:User {profile_id: $follower_id})
+                        MATCH (following:User {profile_id: $following_id})
+                        MERGE (follower)-[:FOLLOWS {created_at: $timestamp, platform: $platform}]->(following)
+                        """
+                        
+                        session.run(query, {
+                            "follower_id": follower["profile_id"],
+                            "following_id": following["profile_id"],
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "platform": follower.get("platform", "unknown")
+                        })
+                        
+                        created_count += 1
+                
+                logger.info(f"Created {created_count} mock follow relationships in Neo4j")
+                return created_count
+                
+        except Exception as e:
+            logger.error(f"Error creating mock follow relationships in Neo4j: {e}")
             return 0
     
     async def get_user_network(self, profile_id: str, depth: int = 2) -> Dict[str, Any]:
@@ -491,7 +503,8 @@ class RedisStorage:
             cached_count = 0
             for profile in profiles:
                 key = f"profile:{profile['profile_id']}"
-                value = json.dumps(profile)
+                # Use bson json_util to handle ObjectId serialization
+                value = json_util.dumps(profile)
                 self.client.setex(key, ttl, value)
                 cached_count += 1
             
@@ -511,7 +524,8 @@ class RedisStorage:
             cached_count = 0
             for post in posts:
                 key = f"post:{post['publication_id']}"
-                value = json.dumps(post)
+                # Use bson json_util to handle ObjectId serialization
+                value = json_util.dumps(post)
                 self.client.setex(key, ttl, value)
                 cached_count += 1
             
@@ -528,7 +542,7 @@ class RedisStorage:
             key = f"profile:{profile_id}"
             value = self.client.get(key)
             if value:
-                return json.loads(value)
+                return json_util.loads(value)
             return None
         except Exception as e:
             logger.error(f"Error retrieving cached profile from Redis: {e}")
@@ -540,7 +554,7 @@ class RedisStorage:
             key = f"post:{publication_id}"
             value = self.client.get(key)
             if value:
-                return json.loads(value)
+                return json_util.loads(value)
             return None
         except Exception as e:
             logger.error(f"Error retrieving cached post from Redis: {e}")

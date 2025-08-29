@@ -3,6 +3,7 @@ Efficient Lens Chain data collector - no blockchain scanning
 """
 import asyncio
 import time
+import random
 from typing import Dict, List, Optional, Any, Set
 from datetime import datetime, timedelta
 from web3 import Web3
@@ -41,6 +42,9 @@ class LensChainCollector:
         # Rate limiting
         self.last_request_time = 0
         self.min_request_interval = 0.1  # 100ms between requests
+        
+        # Block tracking to avoid duplicates
+        self.last_processed_block = 0  # Reset tracking
     
     async def _rate_limit(self):
         """Rate limiting to avoid overwhelming the RPC"""
@@ -65,12 +69,12 @@ class LensChainCollector:
             
             accounts = []
             
-            # Look at recent blocks for transactions (limited scope)
-            for i in range(min(limit, 5)):  # Only look at 5 recent blocks
+            # Look at recent blocks for transactions (larger scope to avoid duplicates)
+            for i in range(min(limit, 50)):  # Look at 50 recent blocks
                 try:
                     await self._rate_limit()
                     
-                    block_num = latest_block - i
+                    block_num = latest_block - i  # Use recent blocks
                     if block_num < 0:
                         break
                     
@@ -82,6 +86,7 @@ class LensChainCollector:
                         tx_hash = block.transactions[0].hex()
                         
                         account_data = {
+                            "profile_id": f"lens_profile_{block_num}_{tx_hash[:8]}",  # 修复字段名
                             "account_id": f"lens_account_{block_num}_{tx_hash[:8]}",
                             "block_number": block_num,
                             "transaction_hash": tx_hash,
@@ -103,6 +108,10 @@ class LensChainCollector:
                     logger.debug(f"Error processing block {block_num}: {e}")
                     continue
             
+            # Update last processed block
+            if accounts:
+                self.last_processed_block = max(account["block_number"] for account in accounts)
+            
             logger.info(f"Collected {len(accounts)} accounts from blockchain")
             return accounts
             
@@ -121,11 +130,11 @@ class LensChainCollector:
             posts = []
             
             # Look at recent blocks for posts
-            for i in range(min(limit, 10)):  # Only look at 10 recent blocks
+            for i in range(min(limit, 60)):  # Look at 60 recent blocks
                 try:
                     await self._rate_limit()
                     
-                    block_num = latest_block - i
+                    block_num = latest_block - i  # Use recent blocks
                     if block_num < 0:
                         break
                     
@@ -136,7 +145,8 @@ class LensChainCollector:
                         
                         post_data = {
                             "post_id": f"lens_post_{block_num}_{tx_hash[:8]}",
-                            "account_id": f"lens_account_{block_num % 5}_{tx_hash[:8]}",
+                            "publication_id": f"lens_pub_{block_num}_{tx_hash[:8]}",  # 修复字段名
+                            "account_id": f"lens_account_{block_num}_{tx_hash[:8]}",  # 使用完整account_id
                             "block_number": block_num,
                             "transaction_hash": tx_hash,
                             "created_at": datetime.utcnow().isoformat(),
@@ -175,11 +185,11 @@ class LensChainCollector:
             interactions = []
             
             # Look at recent blocks for interactions
-            for i in range(min(limit, 15)):  # Only look at 15 recent blocks
+            for i in range(min(limit, 80)):  # Look at 80 recent blocks
                 try:
                     await self._rate_limit()
                     
-                    block_num = latest_block - i
+                    block_num = latest_block - i  # Use recent blocks
                     if block_num < 0:
                         break
                     
@@ -190,8 +200,9 @@ class LensChainCollector:
                         
                         interaction_data = {
                             "interaction_id": f"lens_interaction_{block_num}_{tx_hash[:8]}",
-                            "account_id": f"lens_account_{block_num % 5}_{tx_hash[:8]}",
-                            "post_id": f"lens_post_{block_num % 10}_{tx_hash[:8]}",
+                            "engagement_id": f"lens_eng_{block_num}_{tx_hash[:8]}",  # 修复字段名
+                            "account_id": f"lens_account_{block_num}_{tx_hash[:8]}",  # 使用完整account_id
+                            "post_id": f"lens_post_{block_num}_{tx_hash[:8]}",  # 使用完整post_id
                             "block_number": block_num,
                             "transaction_hash": tx_hash,
                             "created_at": datetime.utcnow().isoformat(),

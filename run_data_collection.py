@@ -44,10 +44,7 @@ async def run_single_collection(collector: MainDataCollector,
                     total_profiles += len(data.get("accounts", []))
                     total_posts += len(data.get("posts", []))
                     total_interactions += len(data.get("interactions", []))
-                elif platform == "farcaster":
-                    total_profiles += len(data.get("users", []))
-                    total_posts += len(data.get("casts", []))
-                    total_interactions += len(data.get("reactions", []))
+
         
         elapsed_time = time.time() - start_time
         

@@ -14,7 +14,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data_collection.blockchain.lens_chain_collector import LensChainCollector
-from data_collection.blockchain.farcaster_collector import FarcasterCollector
+
 from data_collection.storage.database import DatabaseManager, MongoDBStorage, Neo4jStorage, RedisStorage
 from config.settings import COLLECTION_CONFIG
 
@@ -47,9 +47,7 @@ class MainDataCollector:
             self.collectors["lens_chain"] = LensChainCollector()
             logger.info("Lens Chain collector initialized")
             
-            # Initialize Farcaster collector
-            self.collectors["farcaster"] = FarcasterCollector(api_key=self.api_key)
-            logger.info("Farcaster collector initialized")
+
             
         except Exception as e:
             logger.error(f"Error initializing collectors: {e}")
@@ -120,39 +118,7 @@ class MainDataCollector:
             logger.error(f"Error collecting Lens Chain data: {e}")
             return {}
     
-    async def collect_farcaster_data(self, max_users: int = 100, 
-                                    max_casts: int = 100, 
-                                    max_reactions: int = 100) -> Dict[str, Any]:
-        """
-        Collect data from Farcaster
-        
-        Args:
-            max_users: Maximum users to collect
-            max_casts: Maximum casts to collect
-            max_reactions: Maximum reactions to collect
-        
-        Returns:
-            Collected data dictionary
-        """
-        logger.info(f"Starting Farcaster data collection: {max_users} users, {max_casts} casts, {max_reactions} reactions")
-        
-        try:
-            # Collect data from Farcaster
-            farcaster_data = await self.collectors["farcaster"].collect_all_data(
-                max_users=max_users,
-                max_casts=max_casts,
-                max_reactions=max_reactions
-            )
-            
-            # Store data in different storage systems
-            await self._store_farcaster_data(farcaster_data)
-            
-            logger.info("Farcaster data collection completed successfully")
-            return farcaster_data
-            
-        except Exception as e:
-            logger.error(f"Error collecting Farcaster data: {e}")
-            return {}
+
     
     async def collect_all_platforms(self, max_profiles: int = 100, 
                                    max_posts_per_profile: int = 50) -> Dict[str, Any]:
@@ -183,50 +149,12 @@ class MainDataCollector:
                 logger.error(f"Error collecting from Lens Chain: {e}")
                 all_data["lens_chain"] = {"error": str(e)}
         
-        # Collect from Lens Chain (blockchain)
-        if "lens_chain" in self.collectors and self.collectors["lens_chain"]:
-            try:
-                lens_chain_data = await self.collect_lens_chain_data(
-                    max_accounts=max_profiles,
-                    max_posts=max_posts_per_profile * max_profiles,
-                    max_interactions=max_posts_per_profile * max_profiles
-                )
-                all_data["lens_chain"] = lens_chain_data
-            except Exception as e:
-                logger.error(f"Error collecting from Lens Chain: {e}")
-                all_data["lens_chain"] = {"error": str(e)}
-        
-        # Collect from Farcaster
-        if "farcaster" in self.collectors and self.collectors["farcaster"]:
-            try:
-                farcaster_data = await self.collect_farcaster_data(
-                    max_users=max_profiles,
-                    max_casts=max_posts_per_profile * max_profiles,
-                    max_reactions=max_posts_per_profile * max_profiles
-                )
-                all_data["farcaster"] = farcaster_data
-            except Exception as e:
-                logger.error(f"Error collecting from Farcaster: {e}")
-                all_data["farcaster"] = {"error": str(e)}
+
         
         logger.info("Data collection from all platforms completed")
         return all_data
     
-    # Lens data storage method removed - using Lens Chain instead
-    
-    async def collect_all_platforms(self, max_profiles: int = 100, 
-                                   max_posts_per_profile: int = 50) -> Dict[str, Dict[str, Any]]:
-        """
-        Collect data from all platforms
-        
-        Args:
-            max_profiles: Maximum number of profiles per platform
-            max_posts_per_profile: Maximum posts per profile
-        
-        Returns:
-            Dictionary containing data from all platforms
-        """
-        logger.info("Starting data collection from all platforms")
+
         
         all_platform_data = {}
         
@@ -238,21 +166,7 @@ class MainDataCollector:
             logger.error(f"Failed to collect Lens Chain data: {e}")
             all_platform_data["lens_chain"] = {}
         
-        # Collect from Farcaster
-        try:
-            farcaster_data = await self.collect_farcaster_data(max_profiles, max_posts_per_profile)
-            all_platform_data["farcaster"] = farcaster_data
-        except Exception as e:
-            logger.error(f"Failed to collect Farcaster data: {e}")
-            all_platform_data["farcaster"] = {}
-        
-        # TODO: Add other platforms
-        # try:
-        #     farcaster_data = await self.collect_farcaster_data(max_profiles, max_posts_per_profile)
-        #     all_platform_data["farcaster"] = farcaster_data
-        # except Exception as e:
-        #     logger.error(f"Failed to collect Farcaster data: {e}")
-        #     all_platform_data["farcaster"] = {}
+        # TODO: Add other platforms (Zora, etc.)
         
         logger.info("Data collection from all platforms completed")
         return all_platform_data
@@ -299,13 +213,19 @@ class MainDataCollector:
         try:
             stats = {}
             
-            # Get MongoDB stats
-            profiles = await self.storage["mongodb"].get_profiles(limit=1)
-            if profiles:
-                # Get total counts from MongoDB
-                # This is a simplified approach - in production you'd want proper aggregation queries
-                stats["total_profiles"] = len(profiles)  # This is just sample size
-                stats["total_posts"] = len(await self.storage["mongodb"].get_posts(limit=1))
+            # Get MongoDB stats - get actual total counts
+            try:
+                # Get total counts from MongoDB collections
+                db = self.db_manager.mongodb_db
+                stats["total_profiles"] = db.users.count_documents({})
+                stats["total_posts"] = db.posts.count_documents({})
+                stats["total_interactions"] = db.interactions.count_documents({})
+                
+                logger.info(f"MongoDB counts - Users: {stats['total_profiles']}, Posts: {stats['total_posts']}, Interactions: {stats['total_interactions']}")
+                
+            except Exception as e:
+                logger.error(f"Error getting MongoDB stats: {e}")
+                stats["mongodb_error"] = str(e)
             
             # Get Neo4j stats
             try:
@@ -320,6 +240,12 @@ class MainDataCollector:
                     # Count relationships
                     result = session.run("MATCH ()-[r:FOLLOWS]->() RETURN count(r) as follow_count")
                     stats["neo4j_follows"] = result.single()["follow_count"]
+                    
+                    result = session.run("MATCH ()-[r:POSTED]->() RETURN count(r) as posted_count")
+                    stats["neo4j_posted"] = result.single()["posted_count"]
+                    
+                    result = session.run("MATCH ()-[r:INTERACTED]->() RETURN count(r) as interacted_count")
+                    stats["neo4j_interacted"] = result.single()["interacted_count"]
                     
             except Exception as e:
                 logger.error(f"Error getting Neo4j stats: {e}")
@@ -372,6 +298,10 @@ class MainDataCollector:
                 
                 if lens_chain_data.get("interactions"):
                     await self.storage["neo4j"].create_interaction_relationships(lens_chain_data["interactions"])
+                
+                # Create follow relationships between users (mock data for now)
+                if lens_chain_data.get("accounts") and len(lens_chain_data["accounts"]) > 1:
+                    await self.storage["neo4j"].create_follow_relationships_mock(lens_chain_data["accounts"])
             
             # Store in Redis for caching if available
             if self.storage.get("redis"):
@@ -383,39 +313,7 @@ class MainDataCollector:
         except Exception as e:
             logger.error(f"Error storing Lens Chain data: {e}")
     
-    async def _store_farcaster_data(self, farcaster_data: Dict[str, List]):
-        """Store Farcaster data in all storage systems"""
-        try:
-            # Store in MongoDB
-            if farcaster_data.get("users"):
-                await self.storage["mongodb"].store_profiles(farcaster_data["users"])
-            
-            if farcaster_data.get("casts"):
-                await self.storage["mongodb"].store_posts(farcaster_data["casts"])
-            
-            if farcaster_data.get("reactions"):
-                await self.storage["mongodb"].store_engagements(farcaster_data["reactions"])
-            
-            # Store in Neo4j (graph database) if available
-            if self.storage.get("neo4j"):
-                if farcaster_data.get("users"):
-                    await self.storage["neo4j"].create_user_nodes(farcaster_data["users"])
-                
-                if farcaster_data.get("casts"):
-                    await self.storage["neo4j"].create_post_nodes(farcaster_data["casts"])
-                
-                if farcaster_data.get("reactions"):
-                    await self.storage["neo4j"].create_reaction_relationships(farcaster_data["reactions"])
-            
-            # Store in Redis for caching if available
-            if self.storage.get("redis"):
-                if farcaster_data.get("users"):
-                    await self.storage["redis"].cache_profiles(farcaster_data["users"])
-            
-            logger.info("Farcaster data stored successfully")
-            
-        except Exception as e:
-            logger.error(f"Error storing Farcaster data: {e}")
+
 
 
 async def main():

@@ -30,12 +30,7 @@ ETHEREUM_NETWORKS = {
 
 # Social Platform APIs
 PLATFORM_APIS = {
-    "farcaster": {
-        "api_url": "https://api.farcaster.xyz",
-        "graphql_endpoint": "https://api.farcaster.xyz/graphql",
-        "rate_limit": 100,  # requests per minute
-        "api_key_required": False
-    },
+
     "lens_chain": {
         "api_url": "https://api.lens.xyz",
         "graphql_endpoint": "https://api.lens.xyz/graphql",

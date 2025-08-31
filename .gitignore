@@ -66,13 +66,14 @@ docker-compose.override.yml
 temp/
 tmp/
 
-# Data files (large files)
-*.csv
-*.json
-*.parquet
-*.h5
-*.pkl
-*.pickle
+# Data files (large files) - keep under data/ and models/
+data/
+models/
+mongo-data/
+neo4j-data/
+neo4j-logs/
+neo4j-plugins/
+redis-data/
 
 # Model files
 *.model

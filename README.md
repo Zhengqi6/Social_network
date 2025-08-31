@@ -1,15 +1,12 @@
 # Decentralized Social Network Recommendation Algorithms
 
-This project implements recommendation algorithms for decentralized social networks built on blockchain platforms like Ethereum, focusing on platforms such as Lens Protocol, Farcaster, and Zora.
+Lens-only JSON pipeline for decentralized social recommendation. We collect from Lens GraphQL (chainId=232) and optionally verify via Lens Chain RPC. Output is local JSON/Parquet; no DB required.
 
 ## Project Overview
 
 
-**Platforms:**
-- **Farcaster.xyz** 
-- **Hey.xyz (Lens.xyz)**  
-- **Other Lens.xyz apps** 
-- **Zora.co** - Backup platform
+**Platform:**
+- **Hey.xyz / Lens.xyz (Lens Chain 232)**
 
 **Goals:**
 1. **Account Recommendation** - Follow/link prediction
@@ -23,13 +20,11 @@ This project implements recommendation algorithms for decentralized social netwo
 decentralized-social-recommendation/
 ├── data_collection/           # Data collection modules
 │   ├── blockchain/           # Blockchain interaction
-│   │   ├── ethereum_client.py    # Ethereum client
-│   │   ├── lens_collector.py     # Lens Protocol collector
-│   │   └── farcaster_collector.py # Farcaster collector (TODO)
+│   │   ├── ethereum_client.py        # RPC封装（eth_getLogs）
+│   │   └── lens_collector.py         # Lens采集器（Profiles/Posts/Follows/部分Engagements）
 │   ├── api/                  # API clients
-│   ├── storage/              # Data storage
-│   │   └── database.py           # MongoDB, Neo4j, Redis
-│   └── main_collector.py     # Main collection orchestrator
+│   ├── storage/              # （可选/当前未用）
+│   └── main_collector.py         # 主编排（JSON-only）
 ├── data_processing/          # Data curation and analysis
 ├── models/                   # ML/DL models
 │   ├── link_prediction.py    # Account recommendation
@@ -37,7 +32,7 @@ decentralized-social-recommendation/
 │   └── virality_prediction.py   # Virality prediction
 ├── evaluation/               # Model evaluation
 ├── config/                   # Configuration
-│   ├── settings.py           # Main settings
+│   ├── settings.py           # 配置（GraphQL/RPC）
 │   └── requirements.txt      # Dependencies
 └── logs/                     # Log files
 ```

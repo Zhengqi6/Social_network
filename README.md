@@ -4,12 +4,11 @@ This project implements recommendation algorithms for decentralized social netwo
 
 ## Project Overview
 
-**Team Members:** Wu Yikai, Zhang Zhirui, Wang Zhengqi
 
 **Platforms:**
-- **Farcaster.xyz** - Yikai
-- **Hey.xyz (Lens.xyz)** - Yikai  
-- **Other Lens.xyz apps** - Wang Zhengqi
+- **Farcaster.xyz** 
+- **Hey.xyz (Lens.xyz)**  
+- **Other Lens.xyz apps** 
 - **Zora.co** - Backup platform
 
 **Goals:**
@@ -382,10 +381,4 @@ This project is part of AIS5281 course work at NUS.
 
 ## Contact
 
-**Team Lead**: Feng Ling  
-**Platform**: Microsoft Teams  
-**Server**: 172.28.122.124 (NUS VPN required)
 
----
-
-**Note**: This is a research project for decentralized social network recommendation algorithms. Please respect API rate limits and terms of service for all platforms.

@@ -154,6 +154,32 @@ class EthereumClient:
         except Exception as e:
             logger.error(f"Error getting transaction count for {address}: {e}")
             return 0
+
+    def get_logs(self, address: str | list[str], topics: list[str] | None, from_block: int, to_block: int | str = "latest") -> list[dict]:
+        """Generic wrapper around eth_getLogs for current network.
+
+        Args:
+            address: Contract address or list of addresses
+            topics: List of topic signatures (or None)
+            from_block: Start block
+            to_block: End block (or "latest")
+        Returns:
+            List of log dicts
+        """
+        try:
+            filter_params = {
+                "fromBlock": from_block,
+                "toBlock": to_block,
+                "address": address,
+            }
+            if topics is not None:
+                filter_params["topics"] = topics
+            logs = self.w3.eth.get_logs(filter_params)
+            logger.info(f"Fetched {len(logs)} logs from blocks {from_block}-{to_block}")
+            return [dict(log) for log in logs]
+        except Exception as e:
+            logger.error(f"Error fetching logs: {e}")
+            return []
     
     def estimate_gas(self, to_address: str, data: str = "", value: int = 0) -> int:
         """Estimate gas for a transaction"""

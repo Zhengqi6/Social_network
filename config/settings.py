@@ -20,11 +20,11 @@ ETHEREUM_NETWORKS = {
         "explorer": "https://polygonscan.com"
     },
     "lens_chain": {
-        "rpc_url": os.getenv("LENS_CHAIN_RPC", "https://mainnet.era.zksync.io"),
-        "chain_id": 324,  # ZKSync Era Mainnet
-        "explorer": "https://explorer.zksync.io",
-        "layer2": True,
-        "zk_proofs": True
+        # Lens Chain network info
+        "rpc_url": os.getenv("LENS_CHAIN_RPC", "https://rpc.lens.xyz"),
+        "chain_id": int(os.getenv("LENS_CHAIN_ID", 232)),
+        "explorer": "https://explorer.lens.xyz",
+        "layer2": True
     }
 }
 
@@ -33,13 +33,12 @@ PLATFORM_APIS = {
 
     "lens_chain": {
         "api_url": "https://api.lens.xyz",
-        "graphql_endpoint": "https://api.lens.xyz/graphql",
-        "rate_limit": 50,
+        "graphql_endpoint": os.getenv("LENS_GRAPHQL_ENDPOINT", "https://api.lens.xyz/graphql"),
+        "rate_limit": int(os.getenv("LENS_GRAPHQL_RATE_LIMIT", 50)),
         "api_key_required": False,
         "chain_type": "layer2",
         "rpc_endpoints": [
-            "https://rpc.zksync.io",
-            "https://mainnet.era.zksync.io"
+            os.getenv("LENS_CHAIN_RPC", "https://rpc.lens.xyz")
         ]
     },
     "zora": {

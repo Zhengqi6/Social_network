@@ -13,9 +13,8 @@ import os
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from data_collection.blockchain.lens_chain_collector import LensChainCollector
+from data_collection.blockchain.lens_collector import LensCollector
 
-from data_collection.storage.database import DatabaseManager, MongoDBStorage, Neo4jStorage, RedisStorage
 from config.settings import COLLECTION_CONFIG
 
 
@@ -30,22 +29,20 @@ class MainDataCollector:
             api_key: API key for platforms that require it
         """
         self.api_key = api_key
-        self.db_manager = None
         self.collectors = {}
-        self.storage = {}
         
         # Initialize components
         self._initialize_collectors()
-        self._initialize_storage()
+        # JSON-only pipeline, no DB initialization
         
         logger.info("Main data collector initialized")
     
     def _initialize_collectors(self):
         """Initialize data collectors for different platforms"""
         try:
-            # Initialize Lens Chain collector (blockchain-based)
-            self.collectors["lens_chain"] = LensChainCollector()
-            logger.info("Lens Chain collector initialized")
+            # Initialize Lens GraphQL collector (recommended path)
+            self.collectors["lens_graphql"] = LensCollector(use_api=True)
+            logger.info("Lens GraphQL collector initialized")
             
 
             
@@ -54,33 +51,8 @@ class MainDataCollector:
             # Continue with available collectors
     
     def _initialize_storage(self):
-        """Initialize storage systems"""
-        try:
-            self.db_manager = DatabaseManager()
-            
-            # Initialize different storage types
-            self.storage["mongodb"] = MongoDBStorage(self.db_manager)
-            
-            # Try to initialize Neo4j and Redis, but continue if they fail
-            try:
-                self.storage["neo4j"] = Neo4jStorage(self.db_manager)
-                logger.info("Neo4j storage initialized")
-            except Exception as e:
-                logger.warning(f"Neo4j storage failed to initialize: {e}")
-                self.storage["neo4j"] = None
-            
-            try:
-                self.storage["redis"] = RedisStorage(self.db_manager)
-                logger.info("Redis storage initialized")
-            except Exception as e:
-                logger.warning(f"Redis storage failed to initialize: {e}")
-                self.storage["redis"] = None
-            
-            logger.info("Storage systems initialized (some may be unavailable)")
-            
-        except Exception as e:
-            logger.error(f"Error initializing storage: {e}")
-            # Continue with available storage systems
+        """No-op: DBs removed as per JSON-only design."""
+        return
     
     # Lens API collector removed - using Lens Chain instead
     
@@ -132,22 +104,23 @@ class MainDataCollector:
         Returns:
             Collected data from all platforms
         """
-        logger.info("Starting data collection from all platforms")
+        logger.info("Starting JSON-only data collection from Lens GraphQL")
         
         all_data = {}
         
-        # Collect from Lens Chain (blockchain)
-        if "lens_chain" in self.collectors and self.collectors["lens_chain"]:
+        # Collect from Lens via GraphQL (profiles + publications + follows)
+        if "lens_graphql" in self.collectors and self.collectors["lens_graphql"]:
             try:
-                lens_chain_data = await self.collect_lens_chain_data(
-                    max_accounts=max_profiles,
-                    max_posts=max_posts_per_profile * max_profiles,
-                    max_interactions=max_posts_per_profile * max_profiles
+                lens_collector: LensCollector = self.collectors["lens_graphql"]
+                results = await lens_collector.collect_all(
+                    profile_limit=max_profiles,
+                    pub_limit=max_posts_per_profile * max_profiles,
+                    follow_per_profile=50,
                 )
-                all_data["lens_chain"] = lens_chain_data
+                all_data["lens_graphql"] = results
             except Exception as e:
-                logger.error(f"Error collecting from Lens Chain: {e}")
-                all_data["lens_chain"] = {"error": str(e)}
+                logger.error(f"Error collecting from Lens GraphQL: {e}")
+                all_data["lens_graphql"] = {"error": str(e)}
         
 
         
@@ -209,53 +182,8 @@ class MainDataCollector:
             logger.error(f"Error in continuous collection: {e}")
     
     async def get_collection_stats(self) -> Dict[str, Any]:
-        """Get statistics about collected data"""
-        try:
-            stats = {}
-            
-            # Get MongoDB stats - get actual total counts
-            try:
-                # Get total counts from MongoDB collections
-                db = self.db_manager.mongodb_db
-                stats["total_profiles"] = db.users.count_documents({})
-                stats["total_posts"] = db.posts.count_documents({})
-                stats["total_interactions"] = db.interactions.count_documents({})
-                
-                logger.info(f"MongoDB counts - Users: {stats['total_profiles']}, Posts: {stats['total_posts']}, Interactions: {stats['total_interactions']}")
-                
-            except Exception as e:
-                logger.error(f"Error getting MongoDB stats: {e}")
-                stats["mongodb_error"] = str(e)
-            
-            # Get Neo4j stats
-            try:
-                with self.db_manager.neo4j_driver.session() as session:
-                    # Count nodes
-                    result = session.run("MATCH (n:User) RETURN count(n) as user_count")
-                    stats["neo4j_users"] = result.single()["user_count"]
-                    
-                    result = session.run("MATCH (n:Post) RETURN count(n) as post_count")
-                    stats["neo4j_posts"] = result.single()["post_count"]
-                    
-                    # Count relationships
-                    result = session.run("MATCH ()-[r:FOLLOWS]->() RETURN count(r) as follow_count")
-                    stats["neo4j_follows"] = result.single()["follow_count"]
-                    
-                    result = session.run("MATCH ()-[r:POSTED]->() RETURN count(r) as posted_count")
-                    stats["neo4j_posted"] = result.single()["posted_count"]
-                    
-                    result = session.run("MATCH ()-[r:INTERACTED]->() RETURN count(r) as interacted_count")
-                    stats["neo4j_interacted"] = result.single()["interacted_count"]
-                    
-            except Exception as e:
-                logger.error(f"Error getting Neo4j stats: {e}")
-                stats["neo4j_error"] = str(e)
-            
-            return stats
-            
-        except Exception as e:
-            logger.error(f"Error getting collection stats: {e}")
-            return {"error": str(e)}
+        """JSON-only: return empty stats container."""
+        return {}
     
     def close(self):
         """Close all connections and cleanup"""
@@ -266,9 +194,6 @@ class MainDataCollector:
                     collector.close()
                 logger.info(f"Closed {collector_name} collector")
             
-            # Close storage
-            if self.db_manager:
-                self.db_manager.close()
             
             logger.info("Main data collector closed")
             
@@ -361,9 +286,8 @@ async def main():
                 if data:
                     print(f"\n{platform.upper()}:")
                     print(f"  Profiles: {len(data.get('profiles', []))}")
-                    print(f"  Posts: {len(data.get('posts', []))}")
+                    print(f"  Publications: {len(data.get('publications', []))}")
                     print(f"  Follows: {len(data.get('follows', []))}")
-                    print(f"  Engagements: {len(data.get('engagements', []))}")
                 else:
                     print(f"\n{platform.upper()}: No data collected")
     

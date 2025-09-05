@@ -1,379 +1,188 @@
-# Decentralized Social Network Recommendation Algorithms
+# Lens-only Decentralized Social Recommendation (JSON → Parquet)
 
-Lens-only JSON pipeline for decentralized social recommendation. We collect from Lens GraphQL (chainId=232) and optionally verify via Lens Chain RPC. Output is local JSON/Parquet; no DB required.
+This repository implements a Lens-only data pipeline for decentralized social recommendation. Data is collected from Lens GraphQL (`https://api.lens.xyz/graphql`, Chain ID 232) and optionally verified via Lens Chain RPC (`https://rpc.lens.xyz`). Outputs are local JSON snapshots and partitioned Parquet files. No databases are required.
 
-## Project Overview
+## Goals
 
+- **Account recommendation**: Follow/link prediction
+- **Content recommendation**: Individual engagement prediction
+- **Virality prediction**: Share/view prediction for posts/hashtags
+- **(Optional) Sensor nodes**: Early detection of viral content
 
-**Platform:**
-- **Hey.xyz / Lens.xyz (Lens Chain 232)**
-
-**Goals:**
-1. **Account Recommendation** - Follow/link prediction
-2. **Content Recommendation** - Individual engagement prediction
-3. **Virality Prediction** - Total share/view prediction
-4. **Sensor Node Selection** - Identify viral content early
-
-## Architecture
+## Repository Layout
 
 ```
-decentralized-social-recommendation/
-├── data_collection/           # Data collection modules
-│   ├── blockchain/           # Blockchain interaction
-│   │   ├── ethereum_client.py        # RPC封装（eth_getLogs）
-│   │   └── lens_collector.py         # Lens采集器（Profiles/Posts/Follows/部分Engagements）
-│   ├── api/                  # API clients
-│   ├── storage/              # （可选/当前未用）
-│   └── main_collector.py         # 主编排（JSON-only）
-├── data_processing/          # Data curation and analysis
-├── models/                   # ML/DL models
-│   ├── link_prediction.py    # Account recommendation
-│   ├── engagement_prediction.py # Content recommendation
-│   └── virality_prediction.py   # Virality prediction
-├── evaluation/               # Model evaluation
-├── config/                   # Configuration
-│   ├── settings.py           # 配置（GraphQL/RPC）
-│   └── requirements.txt      # Dependencies
-└── logs/                     # Log files
+Social_Network/
+├── config/
+│   └── settings.py                 # Endpoints and rate limits
+├── data/                           # Raw JSON snapshots (gitignored)
+├── data_collection/
+│   ├── blockchain/
+│   │   ├── ethereum_client.py      # Web3 RPC helper (eth_getLogs)
+│   │   └── lens_collector.py       # Lens GraphQL collector (profiles/posts/follows/engagements)
+│   └── main_collector.py           # Orchestrates one-shot / continuous runs
+├── scripts/
+│   ├── json_to_parquet.py          # Convert JSON → Parquet with time partitions
+│   ├── build_link_dataset.py       # Build link prediction dataset from Parquet
+│   └── train_gnn_link.py           # Train a minimal GNN for link prediction
+├── logs/                           # Run logs and collection reports (gitignored)
+└── README.md
 ```
 
-## Features
+## Environment
 
-### 🔗 Blockchain Integration
-- **Ethereum Client**: Full Web3 integration with mainnet and Polygon support
-- **Smart Contract Events**: Monitor and collect on-chain events
-- **Multi-chain Support**: Extensible for different blockchain networks
+Create and activate a virtual environment, then install dependencies.
 
-### 📊 Data Collection
-- **Lens Protocol**: Comprehensive profile, post, and engagement data
-- **Rate Limiting**: Respectful API usage with configurable limits
-- **Async Processing**: High-performance concurrent data collection
-- **Error Handling**: Robust error handling and retry mechanisms
-
-### 💾 Multi-Storage Architecture
-- **MongoDB**: Document storage for profiles, posts, and interactions
-- **Neo4j**: Graph database for social network relationships
-- **Redis**: High-speed caching layer
-- **Data Deduplication**: Smart handling of duplicate data
-
-### 🤖 AI/ML Ready
-- **Graph Neural Networks**: PyTorch Geometric integration
-- **Feature Engineering**: Comprehensive user and content features
-- **Model Pipeline**: End-to-end ML pipeline support
-
-## Installation
-
-### Prerequisites
-- Python 3.8+
-- MongoDB 4.4+
-- Neo4j 4.4+
-- Redis 6.0+
-
-### 1. Clone Repository
-```bash
-git clone <repository-url>
-cd decentralized-social-recommendation
-```
-
-### 2. Create Virtual Environment
 ```bash
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-```
-
-### 3. Install Dependencies
-```bash
+source venv/bin/activate
 pip install -r config/requirements.txt
 ```
 
-### 4. Environment Configuration
-Create a `.env` file in the project root:
+Optional `.env` (values already have safe defaults):
+
 ```bash
-# Ethereum Configuration
-ETHEREUM_MAINNET_RPC=https://mainnet.infura.io/v3/YOUR_PROJECT_ID
-POLYGON_RPC=https://polygon-rpc.com
-
-# Database Configuration
-MONGODB_URI=mongodb://localhost:27017
-NEO4J_URI=bolt://localhost:7687
-NEO4J_USER=neo4j
-NEO4J_PASSWORD=your_password
-REDIS_HOST=localhost
-REDIS_PORT=6379
-REDIS_PASSWORD=
-
-# Lens Protocol (if required)
-LENS_API_KEY=your_lens_api_key
+# Lens
+LENS_GRAPHQL_ENDPOINT=https://api.lens.xyz/graphql
+LENS_CHAIN_RPC=https://rpc.lens.xyz
+LENS_CHAIN_ID=232
 
 # Logging
 LOG_LEVEL=INFO
 ```
 
-### 5. Start Services
+## Data Collection (Lens GraphQL)
+
+One-shot collection:
+
 ```bash
-# Start MongoDB
-mongod
-
-# Start Neo4j
-neo4j start
-
-# Start Redis
-redis-server
+python data_collection/main_collector.py --max-profiles 50 --max-posts 100
 ```
 
-## Usage
+This calls `LensCollector.collect_all()` to fetch:
+- `profiles` via `accounts(request:{ pageSize, cursor })`
+- `publications` via `posts(request:{ pageSize, cursor })` with fragments on `Post` and `Repost`
+- `follows` via `following(request:{ account, pageSize, orderBy, cursor })` for collected accounts
+- `engagements` via `postReferences(request:{ referencedPost, referenceTypes, ... })` for a small set of posts
 
-### Basic Data Collection
+Snapshots are saved into `data/` with timestamped file names.
 
-#### 1. Single Collection Cycle
+## File Naming and Directory Structure (VERY IMPORTANT)
+
+Raw JSON snapshots (all saved under `data/`):
+
+- `lens_profiles_YYYYMMDD_HHMMSS.json`
+  - List of profile dicts. Minimal schema:
+    - `profile_id` (string): account address
+    - `handle` (string | null): `username.localName`
+    - `name` (string | null): `metadata.name`
+    - `bio` (string | null): `metadata.bio`
+    - `owned_by` (string): address (same as `profile_id`)
+    - `created_at` (string RFC3339): Lens account created time
+    - `collected_at` (string RFC3339): local collection time
+    - `platform` (string): `lens_protocol`
+
+- `lens_publications_YYYYMMDD_HHMMSS.json`
+  - List of publication dicts (as returned by GraphQL with minimal normalization). Key fields:
+    - `id` (string): publication id
+    - `timestamp` (string): on-protocol timestamp
+    - `contentUri` (string | null): points to content (IPFS/HTTP)
+    - `author.address` (string): author account address
+    - `author.username.localName` (string | null): author handle
+    - `__typename` (string): `Post` or `Repost`
+
+- `lens_follows_YYYYMMDD_HHMMSS.json`
+  - List of follow edges:
+    - `follower_address` (string)
+    - `following_address` (string)
+    - `following_handle` (string | null)
+    - `followed_on` (string)
+    - `platform` (string): `lens_protocol`
+
+- `lens_engagements_YYYYMMDD_HHMMSS.json` (optional, small sampled set per run)
+  - List of engagement edges created from references:
+    - `user_address` (string): who referenced
+    - `post_id` (string): the referenced post id
+    - `ref_post_id` (string): the referencing post id
+    - `engagement_type` (string): one of `QUOTE_OF`, `COMMENT_ON`, `REPOST_OF`
+    - `timestamp` (string)
+
+Partitioned Parquet outputs (under `data/lens/`):
+
+```
+data/lens/
+├── profiles/
+│   └── dt=YYYYMMDD_HHMMSS/profiles.parquet
+├── posts/
+│   └── dt=YYYYMMDD_HHMMSS/publications.parquet
+├── follows/
+│   └── dt=YYYYMMDD_HHMMSS/follows.parquet
+└── engagements/
+    └── dt=YYYYMMDD_HHMMSS/engagements.parquet
+```
+
+Convert latest JSON snapshots to Parquet partitions:
+
 ```bash
-python data_collection/main_collector.py --max-profiles 100 --max-posts 50
+python scripts/json_to_parquet.py
 ```
 
-#### 2. Continuous Collection
+Or specify exact files:
+
 ```bash
-python data_collection/main_collector.py --continuous --interval 60 --max-profiles 50 --max-posts 25
+python scripts/json_to_parquet.py \
+  --profiles data/lens_profiles_20250831_213416.json \
+  --publications data/lens_publications_20250831_213416.json \
+  --follows data/lens_follows_20250831_213416.json \
+  --engagements data/lens_engagements_20250831_213935.json
 ```
 
-#### 3. View Statistics
+Parquet normalization details:
+- `publications`: flattened columns `author_address`, `author_username` retained with `id`, `timestamp`, `contentUri`, `__typename`
+- `profiles`: `profile_id`, `handle`, `name`, `bio`, `owned_by`, `created_at`
+- `follows`: `follower_address`, `following_address`, `following_handle`, `followed_on`
+- `engagements`: `user_address`, `post_id`, `ref_post_id`, `engagement_type`, `timestamp`
+
+## Building a Minimal Link Prediction Dataset
+
+From Parquet, build a small train/test dataset with structural features:
+
 ```bash
-python data_collection/main_collector.py --stats
+python scripts/build_link_dataset.py
 ```
 
-### Command Line Options
+Outputs under `data/miniset/link/`:
+- `train.csv`, `test.csv` with positive/negative edges and features:
+  - Common neighbors, Jaccard, Adamic–Adar, Resource Allocation, Preferential Attachment
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--api-key` | API key for platforms requiring authentication | None |
-| `--max-profiles` | Maximum profiles to collect per platform | 100 |
-| `--max-posts` | Maximum posts per profile | 50 |
-| `--continuous` | Run continuous collection | False |
-| `--interval` | Collection interval in minutes | 60 |
-| `--stats` | Show collection statistics | False |
+## Training a Simple GNN for Link Prediction
 
-### Programmatic Usage
+Train a small GCN on the built dataset:
 
-```python
-import asyncio
-from data_collection.main_collector import MainDataCollector
-
-async def main():
-    # Initialize collector
-    collector = MainDataCollector(api_key="your_api_key")
-    
-    try:
-        # Collect data from all platforms
-        data = await collector.collect_all_platforms(
-            max_profiles=100,
-            max_posts_per_profile=50
-        )
-        
-        print(f"Collected {len(data['lens']['profiles'])} Lens profiles")
-        
-    finally:
-        collector.close()
-
-# Run
-asyncio.run(main())
-```
-
-## Data Collection Process
-
-### 1. Profile Collection
-- **User Information**: Handle, name, bio, profile pictures
-- **Social Stats**: Follower/following counts, post counts
-- **On-chain Identity**: ENS names, Sybil verification, proof of humanity
-- **Follow Modules**: Custom follow logic and NFT addresses
-
-### 2. Content Collection
-- **Posts**: Text content, media, metadata, engagement stats
-- **Comments**: Threaded conversations and interactions
-- **Mirrors**: Content sharing and amplification
-- **Timestamps**: Creation and interaction timing
-
-### 3. Relationship Mapping
-- **Follow Networks**: Who follows whom
-- **Engagement Patterns**: Likes, comments, mirrors, collects
-- **Content Interactions**: User-content engagement history
-
-### 4. Storage Strategy
-- **MongoDB**: Raw data storage with indexing
-- **Neo4j**: Graph relationships and network analysis
-- **Redis**: High-frequency data caching
-- **Data Deduplication**: Smart handling of repeated data
-
-## Data Schema
-
-### User Profiles
-```json
-{
-  "profile_id": "0x1234...",
-  "handle": "username",
-  "name": "Display Name",
-  "bio": "User biography",
-  "total_followers": 1000,
-  "total_following": 500,
-  "total_posts": 150,
-  "owned_by": "0xabcd...",
-  "proof_of_humanity": true,
-  "ens_name": "username.eth",
-  "collected_at": "2024-01-01T00:00:00Z"
-}
-```
-
-### Posts
-```json
-{
-  "publication_id": "0x5678...",
-  "profile_id": "0x1234...",
-  "type": "post",
-  "content": "Post content",
-  "media_urls": ["https://..."],
-  "total_mirrors": 25,
-  "total_comments": 15,
-  "total_collects": 8,
-  "created_at_timestamp": 1704067200,
-  "collected_at": "2024-01-01T00:00:00Z"
-}
-```
-
-### Follow Relationships
-```json
-{
-  "follow_id": "follower_following",
-  "follower_id": "0x1234...",
-  "following_id": "0x5678...",
-  "timestamp": "2024-01-01T00:00:00Z",
-  "collected_at": "2024-01-01T00:00:00Z"
-}
-```
-
-## Development
-
-### Adding New Platforms
-
-1. **Create Collector Class**
-```python
-class NewPlatformCollector:
-    def __init__(self, api_key=None):
-        # Initialize platform-specific client
-        
-    async def collect_profiles(self, limit=100, offset=0):
-        # Implement profile collection
-        
-    async def collect_posts(self, profile_id=None, limit=100, offset=0):
-        # Implement post collection
-```
-
-2. **Add to Main Collector**
-```python
-def _initialize_collectors(self):
-    # ... existing code ...
-    self.collectors["new_platform"] = NewPlatformCollector(api_key=self.api_key)
-```
-
-3. **Update Configuration**
-```python
-# In config/settings.py
-PLATFORM_APIS["new_platform"] = {
-    "api_url": "https://api.newplatform.com",
-    "graphql_endpoint": "https://api.newplatform.com/graphql",
-    "rate_limit": 100,
-    "api_key_required": False
-}
-```
-
-### Adding New Data Types
-
-1. **Extend Storage Classes**
-2. **Update Data Processing**
-3. **Add to Feature Engineering**
-4. **Update Model Inputs**
-
-## Monitoring and Logging
-
-### Log Files
-- **Location**: `logs/data_collection.log`
-- **Rotation**: Daily
-- **Retention**: 7 days
-- **Format**: Timestamp | Level | Message
-
-### Key Metrics
-- **Collection Rate**: Profiles/posts per minute
-- **Success Rate**: Successful vs failed requests
-- **Storage Performance**: Database operation timing
-- **Error Tracking**: Failed requests and exceptions
-
-## Performance Considerations
-
-### Rate Limiting
-- **Lens Protocol**: 50 requests/minute
-- **Farcaster**: 100 requests/minute
-- **Zora**: 200 requests/minute
-- **Configurable delays** between requests
-
-### Batch Processing
-- **Profile Collection**: 100 profiles per batch
-- **Post Collection**: 100 posts per batch
-- **Parallel Processing**: Async operations for multiple platforms
-
-### Storage Optimization
-- **Indexing**: Database indexes on key fields
-- **Caching**: Redis for frequently accessed data
-- **Compression**: Efficient data storage formats
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Connection Timeouts**
-   - Check VPN connection (NUS VPN required)
-   - Verify server accessibility
-   - Check firewall settings
-
-2. **Database Connection Errors**
-   - Verify service status (MongoDB, Neo4j, Redis)
-   - Check connection strings in `.env`
-   - Verify authentication credentials
-
-3. **API Rate Limiting**
-   - Reduce collection frequency
-   - Increase `rate_limit_delay` in settings
-   - Use multiple API keys if available
-
-4. **Memory Issues**
-   - Reduce batch sizes
-   - Implement data streaming for large datasets
-   - Monitor system resources
-
-### Debug Mode
 ```bash
-# Set log level to DEBUG
-export LOG_LEVEL=DEBUG
-
-# Run with verbose output
-python data_collection/main_collector.py --max-profiles 10 --max-posts 5
+python scripts/train_gnn_link.py
 ```
 
-## Contributing
+Model is saved to `models/link_gnn.pt` (gitignored). The script prints AUC on the test set.
 
-### Code Style
-- **Python**: PEP 8 compliance
-- **Documentation**: Docstrings for all functions
-- **Type Hints**: Full type annotation
-- **Testing**: Unit tests for new features
+## Optional: On-chain Verification (Lens Chain RPC)
 
-### Development Workflow
-1. Create feature branch
-2. Implement changes
-3. Add tests
-4. Update documentation
-5. Submit pull request
+If needed for provenance checks, `data_collection/blockchain/ethereum_client.py` provides `get_logs()` to query Lens Chain events via `eth_getLogs`. You can map a publication/follow to its on-chain event window and verify timestamps. This is optional and not required for the JSON → Parquet → ML pipeline.
 
-## License
+## Notes and Limits
 
-This project is part of AIS5281 course work at NUS.
+- Rate limiting is enforced in `lens_collector.py` with simple pacing. If you encounter 429s, reduce `pageSize`, increase delays, or split runs.
+- Engagements use references and are sampled to keep runs fast. Expand carefully with backoff.
+- We intentionally do not write any data back to chain. All artifacts are local JSON/Parquet.
 
-## Contact
+## Quick Start Recap
+
+1) Install deps: `pip install -r config/requirements.txt`
+2) Collect: `python data_collection/main_collector.py --max-profiles 50 --max-posts 100`
+3) Convert: `python scripts/json_to_parquet.py`
+4) Build dataset: `python scripts/build_link_dataset.py`
+5) Train GNN: `python scripts/train_gnn_link.py`
+
+Everything saved under `data/` and `models/` is gitignored.
 
 

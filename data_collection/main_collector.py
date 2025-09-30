@@ -9,6 +9,7 @@ from typing import Dict, List, Any
 from loguru import logger
 import sys
 import os
+from pathlib import Path
 
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -297,16 +298,19 @@ async def main():
 
 if __name__ == "__main__":
     # Set up logging
+    try:
+        base_dir = Path(__file__).resolve().parents[1]
+    except Exception:
+        base_dir = Path.cwd()
+    logs_dir = base_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
     logger.add(
-        "logs/data_collection.log",
+        str(logs_dir / "data_collection.log"),
         rotation="1 day",
         retention="7 days",
         level="INFO",
         format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}"
     )
-    
-    # Create logs directory if it doesn't exist
-    os.makedirs("logs", exist_ok=True)
     
     # Run main function
     asyncio.run(main())

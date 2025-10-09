@@ -11,15 +11,7 @@ from datetime import datetime
 import aiohttp
 import aiofiles
 from loguru import logger
-from web3 import Web3
 from pathlib import Path
-try:
-    from web3.middleware import geth_poa_middleware
-except ImportError:
-    try:
-        from web3.middleware import poa_middleware as geth_poa_middleware
-    except ImportError:
-        from web3.middleware import ExtraDataToPOAMiddleware as geth_poa_middleware
 from config.settings import PLATFORM_APIS, COLLECTION_CONFIG
 
 
@@ -42,8 +34,24 @@ class LensCollector:
             self.max_retries = int(COLLECTION_CONFIG.get("max_retries", 3))
             self.retry_delay = float(COLLECTION_CONFIG.get("retry_delay", 5))
             self.request_timeout = int(COLLECTION_CONFIG.get("timeout", 30))
+            # Informative logs about bearer presence
+            if self.api_bearer:
+                logger.info("🔐 将使用 LENS_API_BEARER 访问需要鉴权的GraphQL接口（点赞/收藏等）")
+            else:
+                logger.warning("⚠️ 未设置 LENS_API_BEARER，点赞/收藏/书签等需要鉴权的接口将可能返回空集")
         else:
+            # Lazy import web3 to avoid heavy optional dependency when using GraphQL API path
             try:
+                from web3 import Web3  # type: ignore
+                try:
+                    # Prefer geth_poa_middleware when available; fall back to compatible aliases
+                    from web3.middleware import geth_poa_middleware  # type: ignore
+                except Exception:
+                    try:
+                        from web3.middleware import poa_middleware as geth_poa_middleware  # type: ignore
+                    except Exception:
+                        from web3.middleware import ExtraDataToPOAMiddleware as geth_poa_middleware  # type: ignore
+
                 self.w3 = Web3(Web3.HTTPProvider(rpc_url))
                 self.w3.middleware_onion.inject(geth_poa_middleware, layer=0)
                 if not self.w3.is_connected():
@@ -51,6 +59,9 @@ class LensCollector:
                     self.w3 = None
                 else:
                     logger.info(f"✅ 连接到以太坊节点: {rpc_url}")
+            except ImportError:
+                logger.warning("⚠️ 未安装 web3，跳过链上连接（仅使用 GraphQL API）")
+                self.w3 = None
             except Exception as e:
                 logger.warning(f"⚠️ 以太坊节点连接失败: {e}")
                 self.w3 = None
@@ -393,39 +404,42 @@ class LensCollector:
             cursor = None
             fetched = 0
             page_size_enum = "FIFTY" if per_type_limit > 10 else "TEN"
-            while fetched < per_type_limit:
+            unbounded = per_type_limit <= 0
+            while unbounded or fetched < per_type_limit:
+                request_parts = [
+                    f'referencedPost: "{post_id}"',
+                    f"referenceTypes: [{rtype}]",
+                    "visibilityFilter: VISIBLE",
+                    "relevancyFilter: ALL",
+                    f"pageSize: {page_size_enum}",
+                ]
                 if cursor:
-                    query = f"""
-                    query R {{
-                      postReferences(request: {{ referencedPost: \"{post_id}\", referenceTypes: [{rtype}], visibilityFilter: PUBLIC, relevancyFilter: LATEST, pageSize: {page_size_enum}, cursor: \"{cursor}\" }}) {{
-                        items {{
-                          ... on Post {{ id timestamp author {{ address username {{ localName }} }} }}
-                          ... on Repost {{ id timestamp author {{ address username {{ localName }} }} }}
-                        }}
-                        pageInfo {{ next }}
-                      }}
+                    request_parts.append(f'cursor: "{cursor}"')
+                request_body = ", ".join(request_parts)
+                query = f"""
+                query R {{
+                  postReferences(request: {{ {request_body} }}) {{
+                    items {{
+                      ... on Post {{ id timestamp author {{ address username {{ localName }} }} }}
+                      ... on Repost {{ id timestamp author {{ address username {{ localName }} }} repostOf {{ ... on Post {{ id }} }} }}
                     }}
-                    """
-                else:
-                    query = f"""
-                    query R {{
-                      postReferences(request: {{ referencedPost: \"{post_id}\", referenceTypes: [{rtype}], visibilityFilter: PUBLIC, relevancyFilter: LATEST, pageSize: {page_size_enum} }}) {{
-                        items {{
-                          ... on Post {{ id timestamp author {{ address username {{ localName }} }} }}
-                          ... on Repost {{ id timestamp author {{ address username {{ localName }} }} }}
-                        }}
-                        pageInfo {{ next }}
-                      }}
-                    }}
-                    """
+                    pageInfo {{ next }}
+                  }}
+                }}
+                """
                 result = await self._make_lens_api_request(query)
-                data_node = result.get("data") if isinstance(result, dict) else None
+                if not isinstance(result, dict):
+                    break
+                if result.get("errors"):
+                    logger.warning(f"postReferences error ({rtype}, post={post_id}): {result['errors']}")
+                    break
+                data_node = result.get("data")
                 node = (data_node or {}).get("postReferences") if isinstance(data_node, dict) else None
                 if not node:
                     break
                 items = node.get("items") or []
                 for it in items:
-                    if fetched >= per_type_limit:
+                    if not unbounded and fetched >= per_type_limit:
                         break
                     if not isinstance(it, dict):
                         continue
@@ -454,24 +468,35 @@ class LensCollector:
         Returns edges: { user_address, post_id, ref_post_id: None, engagement_type: LIKE|DISLIKE, timestamp }
         """
         edges: List[Dict[str, Any]] = []
+        # Reactions API通常需要Bearer鉴权
+        if not self.api_bearer:
+            logger.warning(f"跳过点赞抓取（post={post_id}）：未设置 LENS_API_BEARER")
+            return edges
         cursor = None
         fetched = 0
         page_size_enum = "FIFTY" if per_limit > 10 else "TEN"
-        while fetched < per_limit:
+        unbounded = per_limit <= 0
+        while unbounded or fetched < per_limit:
             if cursor:
                 query = f"""
-                query W {{
-                  whoReactedPublication(request: {{ on: \"{post_id}\", pageSize: {page_size_enum}, cursor: \"{cursor}\" }}) {{
-                    items {{ reaction createdAt profile {{ address username {{ localName }} }} }}
+                query PostReactions {{
+                  postReactions(request: {{ post: \"{post_id}\", pageSize: {page_size_enum}, cursor: \"{cursor}\" }}) {{
+                    items {{
+                      account {{ address }}
+                      reactions {{ reaction reactedAt }}
+                    }}
                     pageInfo {{ next }}
                   }}
                 }}
                 """
             else:
                 query = f"""
-                query W {{
-                  whoReactedPublication(request: {{ on: \"{post_id}\", pageSize: {page_size_enum} }}) {{
-                    items {{ reaction createdAt profile {{ address username {{ localName }} }} }}
+                query PostReactions {{
+                  postReactions(request: {{ post: \"{post_id}\", pageSize: {page_size_enum} }}) {{
+                    items {{
+                      account {{ address }}
+                      reactions {{ reaction reactedAt }}
+                    }}
                     pageInfo {{ next }}
                   }}
                 }}
@@ -479,29 +504,35 @@ class LensCollector:
             try:
                 result = await self._make_lens_api_request(query)
                 data_node = result.get("data") if isinstance(result, dict) else None
-                node = (data_node or {}).get("whoReactedPublication") if isinstance(data_node, dict) else None
+                node = (data_node or {}).get("postReactions") if isinstance(data_node, dict) else None
                 if not node:
                     break
                 items = node.get("items") or []
                 for it in items:
-                    if fetched >= per_limit:
+                    if not unbounded and fetched >= per_limit:
                         break
                     if not isinstance(it, dict):
                         continue
-                    profile = it.get("profile") or {}
-                    addr = profile.get("address")
+                    acct = it.get("account") or {}
+                    addr = acct.get("address")
                     if not addr:
                         continue
-                    reaction = (it.get("reaction") or "").upper()
-                    engagement_type = "LIKE" if reaction in ("UPVOTE", "LIKE", "UP") else ("DISLIKE" if reaction in ("DOWNVOTE", "DOWN", "DISLIKE") else "REACTION")
-                    edges.append({
-                        "user_address": addr,
-                        "post_id": post_id,
-                        "ref_post_id": None,
-                        "engagement_type": engagement_type,
-                        "timestamp": it.get("createdAt"),
-                    })
-                    fetched += 1
+                    rx_list = it.get("reactions") or []
+                    for rx in rx_list:
+                        if not unbounded and fetched >= per_limit:
+                            break
+                        if not isinstance(rx, dict):
+                            continue
+                        rname = (rx.get("reaction") or "").upper()
+                        engagement_type = "LIKE" if rname in ("UPVOTE", "LIKE", "UP") else ("DISLIKE" if rname in ("DOWNVOTE", "DOWN", "DISLIKE") else "REACTION")
+                        edges.append({
+                            "user_address": addr,
+                            "post_id": post_id,
+                            "ref_post_id": None,
+                            "engagement_type": engagement_type,
+                            "timestamp": rx.get("reactedAt"),
+                        })
+                        fetched += 1
                 cursor = (node.get("pageInfo") or {}).get("next")
                 if not cursor:
                     break
@@ -516,10 +547,15 @@ class LensCollector:
         Returns edges labeled as COLLECT.
         """
         edges: List[Dict[str, Any]] = []
+        # Collects API在多数部署下也需要Bearer
+        if not self.api_bearer:
+            logger.warning(f"跳过Collect抓取（post={post_id}）：未设置 LENS_API_BEARER")
+            return edges
         cursor = None
         fetched = 0
         page_size_enum = "FIFTY" if per_limit > 10 else "TEN"
-        while fetched < per_limit:
+        unbounded = per_limit <= 0
+        while unbounded or fetched < per_limit:
             if cursor:
                 query = f"""
                 query C {{
@@ -546,7 +582,7 @@ class LensCollector:
                     break
                 items = node.get("items") or []
                 for it in items:
-                    if fetched >= per_limit:
+                    if not unbounded and fetched >= per_limit:
                         break
                     prof = it.get("profile") or {}
                     addr = prof.get("address")
@@ -574,10 +610,15 @@ class LensCollector:
         Returns edges labeled as BOOKMARK. Best-effort and may return empty if unsupported.
         """
         edges: List[Dict[str, Any]] = []
+        # Bookmarks也通常需要Bearer
+        if not self.api_bearer:
+            logger.warning(f"跳过书签抓取（post={post_id}）：未设置 LENS_API_BEARER")
+            return edges
         cursor = None
         fetched = 0
         page_size_enum = "FIFTY" if per_limit > 10 else "TEN"
-        while fetched < per_limit:
+        unbounded = per_limit <= 0
+        while unbounded or fetched < per_limit:
             if cursor:
                 query = f"""
                 query B {{
@@ -604,7 +645,7 @@ class LensCollector:
                     break
                 items = node.get("items") or []
                 for it in items:
-                    if fetched >= per_limit:
+                    if not unbounded and fetched >= per_limit:
                         break
                     prof = it.get("profile") or {}
                     addr = prof.get("address")
@@ -656,18 +697,7 @@ class LensCollector:
                 all_eng.extend(edges_rx)
             except Exception as e:
                 logger.debug(f"collect reactions failed for post {pid}: {e}")
-            # Collects (donations/collect)
-            try:
-                edges_c = await self._collect_collects_for_post(pid, per_limit=min(per_post_limit, 10))
-                all_eng.extend(edges_c)
-            except Exception as e:
-                logger.debug(f"collect collects failed for post {pid}: {e}")
-            # Bookmarks
-            try:
-                edges_bm = await self._collect_bookmarks_for_post(pid, per_limit=min(per_post_limit, 10))
-                all_eng.extend(edges_bm)
-            except Exception as e:
-                logger.debug(f"collect bookmarks failed for post {pid}: {e}")
+            # Note: Bookmarks/Collects 暂不兼容当前公开schema（无法按单帖查询“谁书签/谁收藏”），先跳过
         return all_eng
 
     def _derive_repost_engagements(self, publications: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

@@ -420,7 +420,7 @@ class LensCollector:
                 query R {{
                   postReferences(request: {{ {request_body} }}) {{
                     items {{
-                      ... on Post {{ id timestamp author {{ address username {{ localName }} }} }}
+                      ... on Post {{ id timestamp commentOn {{ ... on Post {{ id }} }} root {{ ... on Post {{ id }} }} author {{ address username {{ localName }} }} }}
                       ... on Repost {{ id timestamp author {{ address username {{ localName }} }} repostOf {{ ... on Post {{ id }} }} }}
                     }}
                     pageInfo {{ next }}
@@ -447,6 +447,16 @@ class LensCollector:
                     ts = it.get("timestamp")
                     ref_pid = it.get("id")
                     if not user_addr:
+                        continue
+                    comment_on = None
+                    try:
+                        comment_node = it.get("commentOn") if isinstance(it.get("commentOn"), dict) else None
+                        if isinstance(comment_node, dict):
+                            comment_on = comment_node.get("id")
+                    except Exception:
+                        comment_on = None
+                    if rtype == "COMMENT_ON" and comment_on and comment_on != post_id:
+                        # Skip nested replies; focus on direct comments to the target post
                         continue
                     engagements.append({
                         "user_address": user_addr,

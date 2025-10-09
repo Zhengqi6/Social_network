@@ -43,9 +43,14 @@ Optional `.env` (values already have safe defaults):
 
 ```bash
 # Lens
-LENS_GRAPHQL_ENDPOINT=https://api.lens.xyz/graphql
+LENS_GRAPHQL_ENDPOINT=https://api-v2.lens.dev
 LENS_CHAIN_RPC=https://rpc.lens.xyz
 LENS_CHAIN_ID=232
+# If you want reactions/bookmarks/collects, set a Bearer token:
+# 1) export PRIVATE_KEY=0x...
+# 2) python scripts/lens_auth.py --write-env
+# 3) restart your shell or reload env
+# LENS_API_BEARER=eyJhbGciOi...
 
 # Logging
 LOG_LEVEL=INFO
@@ -64,6 +69,10 @@ This calls `LensCollector.collect_all()` to fetch:
 - `publications` via `posts(request:{ pageSize, cursor })` with fragments on `Post` and `Repost`
 - `follows` via `following(request:{ account, pageSize, orderBy, cursor })` for collected accounts
 - `engagements` via `postReferences(request:{ referencedPost, referenceTypes, ... })` for a small set of posts
+  and, if `LENS_API_BEARER` is set, adds:
+  - `whoReactedPublication` → LIKE/DISLIKE
+  - `whoBookmarkedPublication` → BOOKMARK
+  - `whoCollectedPublication` → COLLECT
 
 Snapshots are saved into `data/` with timestamped file names.
 
@@ -100,11 +109,11 @@ Raw JSON snapshots (all saved under `data/`):
     - `platform` (string): `lens_protocol`
 
 - `lens_engagements_YYYYMMDD_HHMMSS.json` (optional, small sampled set per run)
-  - List of engagement edges created from references:
-    - `user_address` (string): who referenced
-    - `post_id` (string): the referenced post id
-    - `ref_post_id` (string): the referencing post id
-    - `engagement_type` (string): one of `QUOTE_OF`, `COMMENT_ON`, `REPOST_OF`
+  - List of engagement edges created from references and bearer-gated endpoints:
+    - `user_address` (string)
+    - `post_id` (string)
+    - `ref_post_id` (string | null)
+    - `engagement_type` (string): `QUOTE_OF`, `COMMENT_ON`, `REPOST_OF`, `LIKE`, `BOOKMARK`, `COLLECT`
     - `timestamp` (string)
 
 Partitioned Parquet outputs (under `data/lens/`):

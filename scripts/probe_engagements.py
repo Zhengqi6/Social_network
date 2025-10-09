@@ -16,6 +16,7 @@ CLI options:
 """
 import asyncio
 import json
+from collections import deque
 from pathlib import Path
 from datetime import datetime
 import argparse
@@ -210,6 +211,42 @@ async def run_probe(max_posts: int = 10, per_limit: int = 50) -> dict:
                 continue
             seen_edges.add(key)
             all_edges.append(e)
+
+    async def fetch_engagement_edges(pid: str, limit: int) -> list[dict]:
+        edges_local: list[dict] = []
+        try:
+            rx = await collector._collect_reactions_for_post(pid, per_limit=limit)
+        except Exception:
+            rx = []
+        try:
+            cc = await collector._collect_collects_for_post(pid, per_limit=limit)
+        except Exception:
+            cc = []
+        try:
+            bm = await collector._collect_bookmarks_for_post(pid, per_limit=limit)
+        except Exception:
+            bm = []
+        try:
+            refs = await collector._collect_references_for_post(pid, per_type_limit=limit)
+        except Exception:
+            refs = []
+        edges_local.extend(rx)
+        edges_local.extend(cc)
+        edges_local.extend(bm)
+        edges_local.extend(refs)
+        return edges_local
+
+    processed_posts: set[str] = set()
+    pending: deque[str] = deque()
+    queued_posts: set[str] = set()
+
+    def enqueue(pid: str | None) -> None:
+        if not pid or not isinstance(pid, str):
+            return
+        if pid in processed_posts or pid in queued_posts:
+            return
+        queued_posts.add(pid)
+        pending.append(pid)
     # Derive REPOST_OF edges directly from the publications list to ensure Repost counts are present
     try:
         for it in pubs:
@@ -223,6 +260,8 @@ async def run_probe(max_posts: int = 10, per_limit: int = 50) -> dict:
             root_post_id = repost_of.get("id")
             if not addr or not root_post_id:
                 continue
+            add_target(root_post_id)
+            enqueue(root_post_id)
             append_unique([{
                 "user_address": addr,
                 "post_id": root_post_id,
@@ -233,28 +272,56 @@ async def run_probe(max_posts: int = 10, per_limit: int = 50) -> dict:
     except Exception:
         pass
     for pid in collect_post_ids:
-        try:
-            rx = await collector._collect_reactions_for_post(pid, per_limit=per_limit)
-        except Exception:
-            rx = []
-        try:
-            cc = await collector._collect_collects_for_post(pid, per_limit=per_limit)
-        except Exception:
-            cc = []
-        try:
-            bm = await collector._collect_bookmarks_for_post(pid, per_limit=per_limit)
-        except Exception:
-            bm = []
-        try:
-            refs = await collector._collect_references_for_post(pid, per_type_limit=per_limit)
-        except Exception:
-            refs = []
-        append_unique(rx)
-        append_unique(cc)
-        append_unique(bm)
-        append_unique(refs)
+        enqueue(pid)
 
-    post_stats = await _fetch_stats_for_posts(collector, collect_post_ids)
+    while pending:
+        pid = pending.popleft()
+        if pid in processed_posts:
+            continue
+        edges_local = await fetch_engagement_edges(pid, per_limit)
+        append_unique(edges_local)
+        processed_posts.add(pid)
+        for edge in edges_local:
+            if not isinstance(edge, dict):
+                continue
+            target = edge.get("post_id")
+            if isinstance(target, str):
+                enqueue(target)
+
+    post_stats = await _fetch_stats_for_posts(collector, sorted(processed_posts))
+
+    # Trim engagement edges per post to align with authoritative stats counts when available.
+    desired_counts: dict[str, dict[str, int]] = {}
+    for pid, stats in post_stats.items():
+        if not isinstance(pid, str) or not isinstance(stats, dict):
+            continue
+        desired_counts[pid] = {
+            "COMMENT_ON": int(stats.get("comments") or 0),
+            "REPOST_OF": int(stats.get("reposts") or 0),
+            "LIKE": int(stats.get("reactions") or 0),
+            "TIP": int(stats.get("tips") or 0),
+        }
+
+    edges_by_key: dict[tuple[str, str], list[dict]] = {}
+    for edge in all_edges:
+        if not isinstance(edge, dict):
+            continue
+        pid = edge.get("post_id")
+        et = (edge.get("engagement_type") or "").upper()
+        if not pid or not et:
+            continue
+        edges_by_key.setdefault((pid, et), []).append(edge)
+
+    filtered_edges: list[dict] = []
+    for (pid, et), bucket in edges_by_key.items():
+        bucket.sort(key=lambda e: (e.get("timestamp") or ""), reverse=True)
+        limit = desired_counts.get(pid, {}).get(et)
+        if limit is None or limit <= 0:
+            filtered_edges.extend(bucket)
+        else:
+            filtered_edges.extend(bucket[:limit])
+
+    all_edges = filtered_edges
 
     # Summary by type (overall)
     summary: dict[str, int] = {}

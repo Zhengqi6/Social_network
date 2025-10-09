@@ -33,7 +33,8 @@ PLATFORM_APIS = {
 
     "lens_chain": {
         "api_url": "https://api.lens.xyz",
-        "graphql_endpoint": os.getenv("LENS_GRAPHQL_ENDPOINT", "https://api.lens.xyz/graphql"),
+        # Prefer Lens v2 GraphQL endpoint; can override via LENS_GRAPHQL_ENDPOINT
+        "graphql_endpoint": os.getenv("LENS_GRAPHQL_ENDPOINT", "https://api-v2.lens.dev"),
         "rate_limit": int(os.getenv("LENS_GRAPHQL_RATE_LIMIT", 50)),
         "api_key_required": False,
         "chain_type": "layer2",
